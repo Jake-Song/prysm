@@ -4,18 +4,20 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
+	"github.com/prysmaticlabs/eth2-types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/feed"
 	statefeed "github.com/prysmaticlabs/prysm/beacon-chain/core/feed/state"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/helpers"
 	stateTrie "github.com/prysmaticlabs/prysm/beacon-chain/state"
+	"github.com/prysmaticlabs/prysm/shared/featureconfig"
 	"github.com/prysmaticlabs/prysm/shared/traceutil"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/trace"
 )
 
 // This defines how many epochs since finality the run time will begin to save hot state on to the DB.
-var epochsSinceFinalitySaveHotStateDB = 100
+var epochsSinceFinalitySaveHotStateDB = types.Epoch(100)
 
 // BlockReceiver interface defines the methods of chain service receive and processing new blocks.
 type BlockReceiver interface {
@@ -43,20 +45,21 @@ func (s *Service) ReceiveBlock(ctx context.Context, block *ethpb.SignedBeaconBlo
 	}
 
 	// Update and save head block after fork choice.
-	if err := s.updateHead(ctx, s.getJustifiedBalances()); err != nil {
-		log.WithError(err).Warn("Could not update head")
+	if !featureconfig.Get().UpdateHeadTimely {
+		if err := s.updateHead(ctx, s.getJustifiedBalances()); err != nil {
+			log.WithError(err).Warn("Could not update head")
+		}
+		// Send notification of the processed block to the state feed.
+		s.stateNotifier.StateFeed().Send(&feed.Event{
+			Type: statefeed.BlockProcessed,
+			Data: &statefeed.BlockProcessedData{
+				Slot:        blockCopy.Block.Slot,
+				BlockRoot:   blockRoot,
+				SignedBlock: blockCopy,
+				Verified:    true,
+			},
+		})
 	}
-
-	// Send notification of the processed block to the state feed.
-	s.stateNotifier.StateFeed().Send(&feed.Event{
-		Type: statefeed.BlockProcessed,
-		Data: &statefeed.BlockProcessedData{
-			Slot:        blockCopy.Block.Slot,
-			BlockRoot:   blockRoot,
-			SignedBlock: blockCopy,
-			Verified:    true,
-		},
-	})
 
 	// Handle post block operations such as attestations and exits.
 	if err := s.handlePostBlockOperations(blockCopy.Block); err != nil {
@@ -72,8 +75,9 @@ func (s *Service) ReceiveBlock(ctx context.Context, block *ethpb.SignedBeaconBlo
 	reportSlotMetrics(blockCopy.Block.Slot, s.HeadSlot(), s.CurrentSlot(), s.finalizedCheckpt)
 
 	// Log block sync status.
-	logBlockSyncStatus(blockCopy.Block, blockRoot, s.finalizedCheckpt)
-
+	if err := logBlockSyncStatus(blockCopy.Block, blockRoot, s.finalizedCheckpt, uint64(s.genesisTime.Unix())); err != nil {
+		return err
+	}
 	// Log state transition data.
 	logStateTransitionData(blockCopy.Block)
 
@@ -197,12 +201,12 @@ func (s *Service) handlePostBlockOperations(b *ethpb.BeaconBlock) error {
 func (s *Service) checkSaveHotStateDB(ctx context.Context) error {
 	currentEpoch := helpers.SlotToEpoch(s.CurrentSlot())
 	// Prevent `sinceFinality` going underflow.
-	var sinceFinality uint64
+	var sinceFinality types.Epoch
 	if currentEpoch > s.finalizedCheckpt.Epoch {
 		sinceFinality = currentEpoch - s.finalizedCheckpt.Epoch
 	}
 
-	if sinceFinality >= uint64(epochsSinceFinalitySaveHotStateDB) {
+	if sinceFinality >= epochsSinceFinalitySaveHotStateDB {
 		s.stateGen.EnableSaveHotStateToDB(ctx)
 		return nil
 	}
