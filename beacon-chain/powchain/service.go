@@ -29,11 +29,15 @@ import (
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/state"
 	"github.com/prysmaticlabs/prysm/beacon-chain/db"
 	"github.com/prysmaticlabs/prysm/beacon-chain/powchain/types"
-	stateTrie "github.com/prysmaticlabs/prysm/beacon-chain/state"
+	iface "github.com/prysmaticlabs/prysm/beacon-chain/state/interface"
+	"github.com/prysmaticlabs/prysm/beacon-chain/state/stateV0"
 	"github.com/prysmaticlabs/prysm/beacon-chain/state/stategen"
 	contracts "github.com/prysmaticlabs/prysm/contracts/deposit-contract"
 	protodb "github.com/prysmaticlabs/prysm/proto/beacon/db"
 	"github.com/prysmaticlabs/prysm/shared/bytesutil"
+	"github.com/prysmaticlabs/prysm/shared/httputils"
+	"github.com/prysmaticlabs/prysm/shared/httputils/authorizationmethod"
+	"github.com/prysmaticlabs/prysm/shared/logutil"
 	"github.com/prysmaticlabs/prysm/shared/params"
 	"github.com/prysmaticlabs/prysm/shared/timeutils"
 	"github.com/prysmaticlabs/prysm/shared/trieutil"
@@ -55,24 +59,27 @@ var (
 	})
 )
 
-// time to wait before trying to reconnect with the eth1 node.
-var backOffPeriod = 15 * time.Second
-
-// Amount of times before we log the status of the eth1 dial attempt.
-var logThreshold = 8
-
-// period to log chainstart related information
-var logPeriod = 1 * time.Minute
-
-// error when eth1 node is not synced.
-var errNotSynced = errors.New("eth1 node is still syncing")
+var (
+	// time to wait before trying to reconnect with the eth1 node.
+	backOffPeriod = 15 * time.Second
+	// amount of times before we log the status of the eth1 dial attempt.
+	logThreshold = 8
+	// period to log chainstart related information
+	logPeriod = 1 * time.Minute
+	// threshold of how old we will accept an eth1 node's head to be.
+	eth1Threshold = 20 * time.Minute
+	// error when eth1 node is not synced.
+	errNotSynced = errors.New("eth1 node is still syncing")
+	// error when eth1 node is too far behind.
+	errFarBehind = errors.Errorf("eth1 head is more than %s behind from current wall clock time", eth1Threshold.String())
+)
 
 // ChainStartFetcher retrieves information pertaining to the chain start event
 // of the beacon chain for usage across various services.
 type ChainStartFetcher interface {
 	ChainStartDeposits() []*ethpb.Deposit
 	ChainStartEth1Data() *ethpb.Eth1Data
-	PreGenesisState() *stateTrie.BeaconState
+	PreGenesisState() iface.BeaconState
 	ClearPreGenesisData()
 }
 
@@ -98,14 +105,6 @@ type Chain interface {
 	POWBlockFetcher
 }
 
-// Client defines a struct that combines all relevant ETH1.0 mainchain interactions required
-// by the beacon chain node.
-type Client interface {
-	RPCDataFetcher
-	bind.ContractFilterer
-	bind.ContractCaller
-}
-
 // RPCDataFetcher defines a subset of methods conformed to by ETH1.0 RPC clients for
 // fetching eth1 data from the clients.
 type RPCDataFetcher interface {
@@ -129,14 +128,13 @@ type Service struct {
 	requestingOldLogs       bool
 	connectedETH1           bool
 	isRunning               bool
-	depositContractAddress  common.Address
 	processingLock          sync.RWMutex
+	cfg                     *Web3ServiceConfig
 	ctx                     context.Context
 	cancel                  context.CancelFunc
 	headTicker              *time.Ticker
-	currHttpEndpoint        string
-	httpEndpoints           []string
-	stateNotifier           statefeed.Notifier
+	httpEndpoints           []httputils.Endpoint
+	currHttpEndpoint        httputils.Endpoint
 	httpLogger              bind.ContractFilterer
 	eth1DataFetcher         RPCDataFetcher
 	rpcClient               RPCClient
@@ -145,18 +143,14 @@ type Service struct {
 	depositContractCaller   *contracts.DepositContractCaller
 	depositTrie             *trieutil.SparseMerkleTrie
 	chainStartData          *protodb.ChainStartData
-	beaconDB                db.HeadAccessDatabase // Circular dep if using HeadFetcher.
-	depositCache            *depositcache.DepositCache
 	lastReceivedMerkleIndex int64 // Keeps track of the last received index to prevent log spam.
 	runError                error
-	preGenesisState         *stateTrie.BeaconState
-	stateGen                *stategen.State
-	eth1HeaderReqLimit      uint64
+	preGenesisState         iface.BeaconState
 }
 
 // Web3ServiceConfig defines a config struct for web3 service to use through its life cycle.
 type Web3ServiceConfig struct {
-	HTTPEndpoints      []string
+	HttpEndpoints      []string
 	DepositContract    common.Address
 	BeaconDB           db.HeadAccessDatabase
 	DepositCache       *depositcache.DepositCache
@@ -180,20 +174,25 @@ func NewService(ctx context.Context, config *Web3ServiceConfig) (*Service, error
 		return nil, errors.Wrap(err, "could not setup genesis state")
 	}
 
-	eth1HeaderReqLimit := config.Eth1HeaderReqLimit
-	if eth1HeaderReqLimit == 0 {
-		eth1HeaderReqLimit = defaultEth1HeaderReqLimit
+	if config.Eth1HeaderReqLimit == 0 {
+		config.Eth1HeaderReqLimit = defaultEth1HeaderReqLimit
 	}
 
-	endpoints := dedupEndpoints(config.HTTPEndpoints)
+	stringEndpoints := dedupEndpoints(config.HttpEndpoints)
+	endpoints := make([]httputils.Endpoint, len(stringEndpoints))
+	for i, e := range stringEndpoints {
+		endpoints[i] = HttpEndpoint(e)
+	}
+
 	// Select first http endpoint in the provided list.
-	currEndpoint := ""
-	if len(endpoints) > 0 {
+	var currEndpoint httputils.Endpoint
+	if len(config.HttpEndpoints) > 0 {
 		currEndpoint = endpoints[0]
 	}
 	s := &Service{
 		ctx:              ctx,
 		cancel:           cancel,
+		cfg:              config,
 		httpEndpoints:    endpoints,
 		currHttpEndpoint: currEndpoint,
 		latestEth1Data: &protodb.LatestETH1Data{
@@ -202,21 +201,19 @@ func NewService(ctx context.Context, config *Web3ServiceConfig) (*Service, error
 			BlockHash:          []byte{},
 			LastRequestedBlock: 0,
 		},
-		headerCache:            newHeaderCache(),
-		depositContractAddress: config.DepositContract,
-		stateNotifier:          config.StateNotifier,
-		depositTrie:            depositTrie,
+		headerCache: newHeaderCache(),
+		depositTrie: depositTrie,
 		chainStartData: &protodb.ChainStartData{
 			Eth1Data:           &ethpb.Eth1Data{},
 			ChainstartDeposits: make([]*ethpb.Deposit, 0),
 		},
-		beaconDB:                config.BeaconDB,
-		depositCache:            config.DepositCache,
 		lastReceivedMerkleIndex: -1,
 		preGenesisState:         genState,
 		headTicker:              time.NewTicker(time.Duration(params.BeaconConfig().SecondsPerETH1Block) * time.Second),
-		stateGen:                config.StateGen,
-		eth1HeaderReqLimit:      eth1HeaderReqLimit,
+	}
+
+	if err := s.ensureValidPowchainData(ctx); err != nil {
+		return nil, errors.Wrap(err, "unable to validate powchain data")
 	}
 
 	eth1Data, err := config.BeaconDB.PowchainData(ctx)
@@ -227,7 +224,7 @@ func NewService(ctx context.Context, config *Web3ServiceConfig) (*Service, error
 		s.depositTrie = trieutil.CreateTrieFromProto(eth1Data.Trie)
 		s.chainStartData = eth1Data.ChainstartData
 		if !reflect.ValueOf(eth1Data.BeaconState).IsZero() {
-			s.preGenesisState, err = stateTrie.InitializeFromProto(eth1Data.BeaconState)
+			s.preGenesisState, err = stateV0.InitializeFromProto(eth1Data.BeaconState)
 			if err != nil {
 				return nil, errors.Wrap(err, "Could not initialize state trie")
 			}
@@ -245,10 +242,10 @@ func NewService(ctx context.Context, config *Web3ServiceConfig) (*Service, error
 func (s *Service) Start() {
 	// If the chain has not started already and we don't have access to eth1 nodes, we will not be
 	// able to generate the genesis state.
-	if !s.chainStartData.Chainstarted && s.currHttpEndpoint == "" {
+	if !s.chainStartData.Chainstarted && s.currHttpEndpoint.Url == "" {
 		// check for genesis state before shutting down the node,
 		// if a genesis state exists, we can continue on.
-		genState, err := s.beaconDB.GenesisState(s.ctx)
+		genState, err := s.cfg.BeaconDB.GenesisState(s.ctx)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -258,7 +255,7 @@ func (s *Service) Start() {
 	}
 
 	// Exit early if eth1 endpoint is not set.
-	if s.currHttpEndpoint == "" {
+	if s.currHttpEndpoint.Url == "" {
 		return
 	}
 	go func() {
@@ -290,7 +287,7 @@ func (s *Service) ChainStartDeposits() []*ethpb.Deposit {
 // ClearPreGenesisData clears out the stored chainstart deposits and beacon state.
 func (s *Service) ClearPreGenesisData() {
 	s.chainStartData.ChainstartDeposits = []*ethpb.Deposit{}
-	s.preGenesisState = &stateTrie.BeaconState{}
+	s.preGenesisState = &stateV0.BeaconState{}
 }
 
 // ChainStartEth1Data returns the eth1 data at chainstart.
@@ -300,7 +297,7 @@ func (s *Service) ChainStartEth1Data() *ethpb.Eth1Data {
 
 // PreGenesisState returns a state that contains
 // pre-chainstart deposits.
-func (s *Service) PreGenesisState() *stateTrie.BeaconState {
+func (s *Service) PreGenesisState() iface.BeaconState {
 	return s.preGenesisState
 }
 
@@ -354,7 +351,7 @@ func (s *Service) AreAllDepositsProcessed() (bool, error) {
 		return false, errors.Wrap(err, "could not get deposit count")
 	}
 	count := bytesutil.FromBytes8(countByte)
-	deposits := s.depositCache.AllDeposits(s.ctx, nil)
+	deposits := s.cfg.DepositCache.AllDeposits(s.ctx, nil)
 	if count != uint64(len(deposits)) {
 		return false, nil
 	}
@@ -377,7 +374,7 @@ func (s *Service) connectToPowChain() error {
 		return errors.Wrap(err, "could not dial eth1 nodes")
 	}
 
-	depositContractCaller, err := contracts.NewDepositContractCaller(s.depositContractAddress, httpClient)
+	depositContractCaller, err := contracts.NewDepositContractCaller(s.cfg.DepositContract, httpClient)
 	if err != nil {
 		return errors.Wrap(err, "could not create deposit contract caller")
 	}
@@ -390,10 +387,17 @@ func (s *Service) connectToPowChain() error {
 	return nil
 }
 
-func (s *Service) dialETH1Nodes(endpoint string) (*ethclient.Client, *gethRPC.Client, error) {
-	httpRPCClient, err := gethRPC.Dial(endpoint)
+func (s *Service) dialETH1Nodes(endpoint httputils.Endpoint) (*ethclient.Client, *gethRPC.Client, error) {
+	httpRPCClient, err := gethRPC.Dial(endpoint.Url)
 	if err != nil {
 		return nil, nil, err
+	}
+	if endpoint.Auth.Method != authorizationmethod.None {
+		header, err := endpoint.Auth.ToHeaderValue()
+		if err != nil {
+			return nil, nil, err
+		}
+		httpRPCClient.SetHeader("Authorization", header)
 	}
 	httpClient := ethclient.NewClient(httpRPCClient)
 	// Add a method to clean-up and close clients in the event
@@ -466,7 +470,7 @@ func (s *Service) waitForConnection() {
 			s.connectedETH1 = true
 			s.runError = nil
 			log.WithFields(logrus.Fields{
-				"endpoint": s.currHttpEndpoint,
+				"endpoint": logutil.MaskCredentialsLogging(s.currHttpEndpoint.Url),
 			}).Info("Connected to eth1 proof-of-work chain")
 			return
 		}
@@ -495,7 +499,7 @@ func (s *Service) waitForConnection() {
 	for {
 		select {
 		case <-ticker.C:
-			log.Debugf("Trying to dial endpoint: %s", s.currHttpEndpoint)
+			log.Debugf("Trying to dial endpoint: %s", logutil.MaskCredentialsLogging(s.currHttpEndpoint.Url))
 			errConnect := s.connectToPowChain()
 			if errConnect != nil {
 				errorLogger(errConnect, "Could not connect to powchain endpoint")
@@ -514,7 +518,7 @@ func (s *Service) waitForConnection() {
 				s.connectedETH1 = true
 				s.runError = nil
 				log.WithFields(logrus.Fields{
-					"endpoint": s.currHttpEndpoint,
+					"endpoint": logutil.MaskCredentialsLogging(s.currHttpEndpoint.Url),
 				}).Info("Connected to eth1 proof-of-work chain")
 				return
 			}
@@ -534,7 +538,14 @@ func (s *Service) isEth1NodeSynced() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return syncProg == nil, nil
+	if syncProg != nil {
+		return false, nil
+	}
+	head, err := s.eth1DataFetcher.HeaderByNumber(s.ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	return !eth1HeadIsBehind(head.Time), nil
 }
 
 // Reconnect to eth1 node in case of any failure.
@@ -553,27 +564,27 @@ func (s *Service) initDepositCaches(ctx context.Context, ctrs []*protodb.Deposit
 	if len(ctrs) == 0 {
 		return nil
 	}
-	s.depositCache.InsertDepositContainers(ctx, ctrs)
+	s.cfg.DepositCache.InsertDepositContainers(ctx, ctrs)
 	if !s.chainStartData.Chainstarted {
 		// do not add to pending cache
 		// if no genesis state exists.
 		validDepositsCount.Add(float64(s.preGenesisState.Eth1DepositIndex()))
 		return nil
 	}
-	genesisState, err := s.beaconDB.GenesisState(ctx)
+	genesisState, err := s.cfg.BeaconDB.GenesisState(ctx)
 	if err != nil {
 		return err
 	}
 	// Default to all deposits post-genesis deposits in
 	// the event we cannot find a finalized state.
 	currIndex := genesisState.Eth1DepositIndex()
-	chkPt, err := s.beaconDB.FinalizedCheckpoint(ctx)
+	chkPt, err := s.cfg.BeaconDB.FinalizedCheckpoint(ctx)
 	if err != nil {
 		return err
 	}
 	rt := bytesutil.ToBytes32(chkPt.Root)
 	if rt != [32]byte{} {
-		fState, err := s.stateGen.StateByRoot(ctx, rt)
+		fState, err := s.cfg.StateGen.StateByRoot(ctx, rt)
 		if err != nil {
 			return errors.Wrap(err, "could not get finalized state")
 		}
@@ -588,7 +599,7 @@ func (s *Service) initDepositCaches(ctx context.Context, ctrs []*protodb.Deposit
 	// is more than the current index in state.
 	if uint64(len(ctrs)) > currIndex {
 		for _, c := range ctrs[currIndex:] {
-			s.depositCache.InsertPendingDeposit(ctx, c.Deposit, c.Eth1BlockHeight, c.Index, bytesutil.ToBytes32(c.DepositRoot))
+			s.cfg.DepositCache.InsertPendingDeposit(ctx, c.Deposit, c.Eth1BlockHeight, c.Index, bytesutil.ToBytes32(c.DepositRoot))
 		}
 	}
 	return nil
@@ -733,6 +744,20 @@ func (s *Service) initPOWService() {
 				s.retryETH1Node(err)
 				continue
 			}
+			// Handle edge case with embedded genesis state by fetching genesis header to determine
+			// its height.
+			if s.chainStartData.Chainstarted && s.chainStartData.GenesisBlock == 0 {
+				genHeader, err := s.eth1DataFetcher.HeaderByHash(ctx, common.BytesToHash(s.chainStartData.Eth1Data.BlockHash))
+				if err != nil {
+					log.Errorf("Unable to retrieve genesis ETH1.0 chain header: %v", err)
+					s.retryETH1Node(err)
+					continue
+				}
+				s.chainStartData.GenesisBlock = genHeader.Number.Uint64()
+				if err := s.savePowchainData(ctx); err != nil {
+					log.Errorf("Unable to save powchain data: %v", err)
+				}
+			}
 			return
 		}
 	}
@@ -760,6 +785,11 @@ func (s *Service) run(done <-chan struct{}) {
 			if err != nil {
 				log.WithError(err).Debug("Could not fetch latest eth1 header")
 				s.retryETH1Node(err)
+				continue
+			}
+			if eth1HeadIsBehind(head.Time) {
+				log.WithError(errFarBehind).Debug("Could not get an up to date eth1 header")
+				s.retryETH1Node(errFarBehind)
 				continue
 			}
 			s.processBlockHeader(head)
@@ -858,7 +888,7 @@ func (s *Service) checkDefaultEndpoint() {
 	primaryEndpoint := s.httpEndpoints[0]
 	// Return early if we are running on our primary
 	// endpoint.
-	if s.currHttpEndpoint == primaryEndpoint {
+	if s.currHttpEndpoint.Equals(primaryEndpoint) {
 		return
 	}
 
@@ -889,7 +919,7 @@ func (s *Service) fallbackToNextEndpoint() {
 	totalEndpoints := len(s.httpEndpoints)
 
 	for i, endpoint := range s.httpEndpoints {
-		if endpoint == currEndpoint {
+		if endpoint.Equals(currEndpoint) {
 			currIndex = i
 			break
 		}
@@ -903,7 +933,46 @@ func (s *Service) fallbackToNextEndpoint() {
 		return
 	}
 	s.currHttpEndpoint = s.httpEndpoints[nextIndex]
-	log.Infof("Falling back to alternative endpoint: %s", s.currHttpEndpoint)
+	log.Infof("Falling back to alternative endpoint: %s", logutil.MaskCredentialsLogging(s.currHttpEndpoint.Url))
+}
+
+// validates the current powchain data saved and makes sure that any
+// embedded genesis state is correctly accounted for.
+func (s *Service) ensureValidPowchainData(ctx context.Context) error {
+	genState, err := s.cfg.BeaconDB.GenesisState(ctx)
+	if err != nil {
+		return err
+	}
+	// Exit early if no genesis state is saved.
+	if genState == nil {
+		return nil
+	}
+	eth1Data, err := s.cfg.BeaconDB.PowchainData(ctx)
+	if err != nil {
+		return errors.Wrap(err, "unable to retrieve eth1 data")
+	}
+	if eth1Data == nil || !eth1Data.ChainstartData.Chainstarted {
+		pbState, err := stateV0.ProtobufBeaconState(s.preGenesisState.InnerStateUnsafe())
+		if err != nil {
+			return err
+		}
+		s.chainStartData = &protodb.ChainStartData{
+			Chainstarted:       true,
+			GenesisTime:        genState.GenesisTime(),
+			GenesisBlock:       0,
+			Eth1Data:           genState.Eth1Data(),
+			ChainstartDeposits: make([]*ethpb.Deposit, 0),
+		}
+		eth1Data = &protodb.ETH1ChainData{
+			CurrentEth1Data:   s.latestEth1Data,
+			ChainstartData:    s.chainStartData,
+			BeaconState:       pbState,
+			Trie:              s.depositTrie.ToProto(),
+			DepositContainers: s.cfg.DepositCache.AllDepositContainers(ctx),
+		}
+		return s.cfg.BeaconDB.SavePowchainData(ctx, eth1Data)
+	}
+	return nil
 }
 
 func dedupEndpoints(endpoints []string) []string {
@@ -917,4 +986,12 @@ func dedupEndpoints(endpoints []string) []string {
 		selectionMap[point] = true
 	}
 	return newEndpoints
+}
+
+// Checks if the provided timestamp is beyond the prescribed bound from
+// the current wall clock time.
+func eth1HeadIsBehind(timestamp uint64) bool {
+	timeout := timeutils.Now().Add(-eth1Threshold)
+	// check that web3 client is syncing
+	return time.Unix(int64(timestamp), 0).Before(timeout)
 }

@@ -150,19 +150,21 @@ var (
 	P2PMaxPeers = &cli.IntFlag{
 		Name:  "p2p-max-peers",
 		Usage: "The max number of p2p peers to maintain.",
-		Value: 30,
+		Value: 45,
 	}
 	// P2PAllowList defines a CIDR subnet to exclusively allow connections.
 	P2PAllowList = &cli.StringFlag{
 		Name: "p2p-allowlist",
-		Usage: "The CIDR subnet for allowing only certain peer connections. Example: " +
+		Usage: "The CIDR subnet for allowing only certain peer connections. " +
+			"Using \"public\" would allow only public subnets. Example: " +
 			"192.168.0.0/16 would permit connections to peers on your local network only. The " +
 			"default is to accept all connections.",
 	}
 	// P2PDenyList defines a list of CIDR subnets to disallow connections from them.
 	P2PDenyList = &cli.StringSliceFlag{
 		Name: "p2p-denylist",
-		Usage: "The CIDR subnets for denying certainy peer connections. Example: " +
+		Usage: "The CIDR subnets for denying certainy peer connections. " +
+			"Using \"private\" would deny all private subnets. Example: " +
 			"192.168.0.0/16 would deny connections from peers on your local network only. The " +
 			"default is to accept all connections.",
 	}
@@ -230,6 +232,12 @@ var (
 		Name:  "restore-target-dir",
 		Usage: "Target directory of the restored database",
 		Value: DefaultDataDir(),
+	}
+	// BoltMMapInitialSizeFlag specifies the initial size in bytes of boltdb's mmap syscall.
+	BoltMMapInitialSizeFlag = &cli.IntFlag{
+		Name:  "bolt-mmap-initial-size",
+		Usage: "Specifies the size in bytes of bolt db's mmap syscall allocation",
+		Value: 536870912, // 512 Mb as a default value.
 	}
 )
 

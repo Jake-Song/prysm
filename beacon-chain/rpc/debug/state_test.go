@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	types "github.com/prysmaticlabs/eth2-types"
 	mock "github.com/prysmaticlabs/prysm/beacon-chain/blockchain/testing"
 	dbTest "github.com/prysmaticlabs/prysm/beacon-chain/db/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/state/stategen"
@@ -14,12 +15,11 @@ import (
 )
 
 func TestServer_GetBeaconState(t *testing.T) {
-
 	db := dbTest.SetupDB(t)
 	ctx := context.Background()
 	st, err := testutil.NewBeaconState()
 	require.NoError(t, err)
-	slot := uint64(100)
+	slot := types.Slot(100)
 	require.NoError(t, st.SetSlot(slot))
 	b := testutil.NewBeaconBlock()
 	b.Block.Slot = slot
@@ -42,7 +42,7 @@ func TestServer_GetBeaconState(t *testing.T) {
 	}
 	res, err := bs.GetBeaconState(ctx, req)
 	require.NoError(t, err)
-	wanted, err := st.CloneInnerState().MarshalSSZ()
+	wanted, err := st.MarshalSSZ()
 	require.NoError(t, err)
 	assert.DeepEqual(t, wanted, res.Encoded)
 	req = &pbrpc.BeaconStateRequest{
@@ -56,7 +56,6 @@ func TestServer_GetBeaconState(t *testing.T) {
 }
 
 func TestServer_GetBeaconState_RequestFutureSlot(t *testing.T) {
-
 	ds := &Server{GenesisTimeFetcher: &mock.ChainService{}}
 	req := &pbrpc.BeaconStateRequest{
 		QueryFilter: &pbrpc.BeaconStateRequest_Slot{

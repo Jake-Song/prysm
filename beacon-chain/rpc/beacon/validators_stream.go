@@ -13,7 +13,7 @@ import (
 	"github.com/patrickmn/go-cache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prysmaticlabs/eth2-types"
+	types "github.com/prysmaticlabs/eth2-types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	"github.com/prysmaticlabs/prysm/beacon-chain/blockchain"
 	"github.com/prysmaticlabs/prysm/beacon-chain/cache/depositcache"
@@ -22,7 +22,7 @@ import (
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/helpers"
 	"github.com/prysmaticlabs/prysm/beacon-chain/db"
 	"github.com/prysmaticlabs/prysm/beacon-chain/powchain"
-	"github.com/prysmaticlabs/prysm/beacon-chain/state"
+	iface "github.com/prysmaticlabs/prysm/beacon-chain/state/interface"
 	"github.com/prysmaticlabs/prysm/shared/bytesutil"
 	"github.com/prysmaticlabs/prysm/shared/event"
 	"github.com/prysmaticlabs/prysm/shared/params"
@@ -92,7 +92,7 @@ var (
 // based on the epoch value in the returned validator info.
 func (bs *Server) StreamValidatorsInfo(stream ethpb.BeaconChain_StreamValidatorsInfoServer) error {
 	stateChannel := make(chan *feed.Event, params.BeaconConfig().SlotsPerEpoch)
-	epochDuration := time.Duration(params.BeaconConfig().SecondsPerSlot*params.BeaconConfig().SlotsPerEpoch) * time.Second
+	epochDuration := time.Duration(params.BeaconConfig().SlotsPerEpoch.Mul(params.BeaconConfig().SecondsPerSlot)) * time.Second
 
 	// Fetch our current epoch.
 	headState, err := bs.HeadFetcher.HeadState(bs.Ctx)
@@ -298,7 +298,12 @@ func (is *infostream) generateValidatorsInfo(pubKeys [][]byte) ([]*ethpb.Validat
 }
 
 // generateValidatorInfo generates the validator info for a public key.
-func (is *infostream) generateValidatorInfo(pubKey []byte, validator state.ReadOnlyValidator, headState *state.BeaconState, epoch types.Epoch) (*ethpb.ValidatorInfo, error) {
+func (is *infostream) generateValidatorInfo(
+	pubKey []byte,
+	validator iface.ReadOnlyValidator,
+	headState iface.ReadOnlyBeaconState,
+	epoch types.Epoch,
+) (*ethpb.ValidatorInfo, error) {
 	info := &ethpb.ValidatorInfo{
 		PublicKey: pubKey,
 		Epoch:     epoch,
@@ -330,7 +335,7 @@ func (is *infostream) generateValidatorInfo(pubKey []byte, validator state.ReadO
 
 // generatePendingValidatorInfo generates the validator info for a pending (or unknown) key.
 func (is *infostream) generatePendingValidatorInfo(info *ethpb.ValidatorInfo) (*ethpb.ValidatorInfo, error) {
-	key := fmt.Sprintf("%s", info.PublicKey)
+	key := string(info.PublicKey)
 	var deposit *eth1Deposit
 	is.eth1DepositsMutex.Lock()
 	if fetchedDeposit, exists := is.eth1Deposits.Get(key); exists {
@@ -368,7 +373,7 @@ func (is *infostream) generatePendingValidatorInfo(info *ethpb.ValidatorInfo) (*
 	return info, nil
 }
 
-func (is *infostream) calculateActivationTimeForPendingValidators(res []*ethpb.ValidatorInfo, headState *state.BeaconState, epoch types.Epoch) error {
+func (is *infostream) calculateActivationTimeForPendingValidators(res []*ethpb.ValidatorInfo, headState iface.ReadOnlyBeaconState, epoch types.Epoch) error {
 	// pendingValidatorsMap is map from the validator pubkey to the index in our return array
 	pendingValidatorsMap := make(map[[48]byte]int)
 	for i, info := range res {
@@ -383,9 +388,9 @@ func (is *infostream) calculateActivationTimeForPendingValidators(res []*ethpb.V
 
 	// Fetch the list of pending validators; count the number of attesting validators.
 	numAttestingValidators := uint64(0)
-	pendingValidators := make([]uint64, 0, headState.NumValidators())
+	pendingValidators := make([]types.ValidatorIndex, 0, headState.NumValidators())
 
-	err := headState.ReadFromEveryValidator(func(idx int, val state.ReadOnlyValidator) error {
+	err := headState.ReadFromEveryValidator(func(idx int, val iface.ReadOnlyValidator) error {
 		if val.IsNil() {
 			return errors.New("nil validator in state")
 		}
@@ -462,7 +467,7 @@ func (is *infostream) handleBlockProcessed() {
 }
 
 type indicesSorter struct {
-	indices []uint64
+	indices []types.ValidatorIndex
 }
 
 func (s indicesSorter) Len() int      { return len(s.indices) }
@@ -471,7 +476,7 @@ func (s indicesSorter) Less(i, j int) bool {
 	return s.indices[i] < s.indices[j]
 }
 
-func (is *infostream) calculateStatusAndTransition(validator state.ReadOnlyValidator, currentEpoch types.Epoch) (ethpb.ValidatorStatus, uint64) {
+func (is *infostream) calculateStatusAndTransition(validator iface.ReadOnlyValidator, currentEpoch types.Epoch) (ethpb.ValidatorStatus, uint64) {
 	farFutureEpoch := params.BeaconConfig().FarFutureEpoch
 
 	if validator.IsNil() {
@@ -501,7 +506,7 @@ func (is *infostream) calculateStatusAndTransition(validator state.ReadOnlyValid
 
 // epochToTimestamp converts an epoch number to a timestamp.
 func (is *infostream) epochToTimestamp(epoch types.Epoch) uint64 {
-	return is.genesisTime + uint64(epoch)*params.BeaconConfig().SecondsPerSlot*params.BeaconConfig().SlotsPerEpoch
+	return is.genesisTime + params.BeaconConfig().SecondsPerSlot*uint64(params.BeaconConfig().SlotsPerEpoch.Mul(uint64(epoch)))
 }
 
 // depositQueueTimestamp calculates the timestamp for exit of the validator from the deposit queue.
@@ -532,7 +537,7 @@ func (is *infostream) depositQueueTimestamp(eth1BlockNumber *big.Int) (uint64, e
 	followTime := time.Duration(params.BeaconConfig().Eth1FollowDistance*params.BeaconConfig().SecondsPerETH1Block) * time.Second
 	eth1UnixTime := time.Unix(int64(blockTimestamp), 0).Add(followTime)
 
-	period := uint64(params.BeaconConfig().EpochsPerEth1VotingPeriod.Mul(params.BeaconConfig().SlotsPerEpoch))
+	period := uint64(params.BeaconConfig().EpochsPerEth1VotingPeriod.Mul(uint64(params.BeaconConfig().SlotsPerEpoch)))
 	votingPeriod := time.Duration(period*params.BeaconConfig().SecondsPerSlot) * time.Second
 	activationTime := eth1UnixTime.Add(votingPeriod)
 	eth2Genesis := time.Unix(int64(is.genesisTime), 0)

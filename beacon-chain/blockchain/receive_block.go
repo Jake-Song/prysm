@@ -4,15 +4,15 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
-	"github.com/prysmaticlabs/eth2-types"
+	types "github.com/prysmaticlabs/eth2-types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/feed"
 	statefeed "github.com/prysmaticlabs/prysm/beacon-chain/core/feed/state"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/helpers"
-	stateTrie "github.com/prysmaticlabs/prysm/beacon-chain/state"
+	"github.com/prysmaticlabs/prysm/beacon-chain/state/stateV0"
 	"github.com/prysmaticlabs/prysm/shared/featureconfig"
+	"github.com/prysmaticlabs/prysm/shared/timeutils"
 	"github.com/prysmaticlabs/prysm/shared/traceutil"
-	"github.com/sirupsen/logrus"
 	"go.opencensus.io/trace"
 )
 
@@ -22,7 +22,6 @@ var epochsSinceFinalitySaveHotStateDB = types.Epoch(100)
 // BlockReceiver interface defines the methods of chain service receive and processing new blocks.
 type BlockReceiver interface {
 	ReceiveBlock(ctx context.Context, block *ethpb.SignedBeaconBlock, blockRoot [32]byte) error
-	ReceiveBlockInitialSync(ctx context.Context, block *ethpb.SignedBeaconBlock, blockRoot [32]byte) error
 	ReceiveBlockBatch(ctx context.Context, blocks []*ethpb.SignedBeaconBlock, blkRoots [][32]byte) error
 	HasInitSyncBlock(root [32]byte) bool
 }
@@ -35,7 +34,8 @@ type BlockReceiver interface {
 func (s *Service) ReceiveBlock(ctx context.Context, block *ethpb.SignedBeaconBlock, blockRoot [32]byte) error {
 	ctx, span := trace.StartSpan(ctx, "blockChain.ReceiveBlock")
 	defer span.End()
-	blockCopy := stateTrie.CopySignedBeaconBlock(block)
+	receivedTime := timeutils.Now()
+	blockCopy := stateV0.CopySignedBeaconBlock(block)
 
 	// Apply state transition on the new block.
 	if err := s.onBlock(ctx, blockCopy, blockRoot); err != nil {
@@ -50,7 +50,7 @@ func (s *Service) ReceiveBlock(ctx context.Context, block *ethpb.SignedBeaconBlo
 			log.WithError(err).Warn("Could not update head")
 		}
 		// Send notification of the processed block to the state feed.
-		s.stateNotifier.StateFeed().Send(&feed.Event{
+		s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
 			Type: statefeed.BlockProcessed,
 			Data: &statefeed.BlockProcessedData{
 				Slot:        blockCopy.Block.Slot,
@@ -75,49 +75,11 @@ func (s *Service) ReceiveBlock(ctx context.Context, block *ethpb.SignedBeaconBlo
 	reportSlotMetrics(blockCopy.Block.Slot, s.HeadSlot(), s.CurrentSlot(), s.finalizedCheckpt)
 
 	// Log block sync status.
-	if err := logBlockSyncStatus(blockCopy.Block, blockRoot, s.finalizedCheckpt, uint64(s.genesisTime.Unix())); err != nil {
+	if err := logBlockSyncStatus(blockCopy.Block, blockRoot, s.finalizedCheckpt, receivedTime, uint64(s.genesisTime.Unix())); err != nil {
 		return err
 	}
 	// Log state transition data.
 	logStateTransitionData(blockCopy.Block)
-
-	return nil
-}
-
-// ReceiveBlockInitialSync processes the input block for the purpose of initial syncing.
-// This method should only be used on blocks during initial syncing phase.
-func (s *Service) ReceiveBlockInitialSync(ctx context.Context, block *ethpb.SignedBeaconBlock, blockRoot [32]byte) error {
-	ctx, span := trace.StartSpan(ctx, "blockChain.ReceiveBlockNoVerify")
-	defer span.End()
-	blockCopy := stateTrie.CopySignedBeaconBlock(block)
-
-	// Apply state transition on the new block.
-	if err := s.onBlockInitialSyncStateTransition(ctx, blockCopy, blockRoot); err != nil {
-		err := errors.Wrap(err, "could not process block")
-		traceutil.AnnotateError(span, err)
-		return err
-	}
-
-	// Send notification of the processed block to the state feed.
-	s.stateNotifier.StateFeed().Send(&feed.Event{
-		Type: statefeed.BlockProcessed,
-		Data: &statefeed.BlockProcessedData{
-			Slot:        blockCopy.Block.Slot,
-			BlockRoot:   blockRoot,
-			SignedBlock: blockCopy,
-			Verified:    true,
-		},
-	})
-
-	// Reports on blockCopy and fork choice metrics.
-	reportSlotMetrics(blockCopy.Block.Slot, s.HeadSlot(), s.CurrentSlot(), s.finalizedCheckpt)
-
-	// Log state transition data.
-	log.WithFields(logrus.Fields{
-		"slot":         blockCopy.Block.Slot,
-		"attestations": len(blockCopy.Block.Body.Attestations),
-		"deposits":     len(blockCopy.Block.Body.Deposits),
-	}).Debug("Finished applying state transition")
 
 	return nil
 }
@@ -138,13 +100,13 @@ func (s *Service) ReceiveBlockBatch(ctx context.Context, blocks []*ethpb.SignedB
 	}
 
 	for i, b := range blocks {
-		blockCopy := stateTrie.CopySignedBeaconBlock(b)
+		blockCopy := stateV0.CopySignedBeaconBlock(b)
 		if err = s.handleBlockAfterBatchVerify(ctx, blockCopy, blkRoots[i], fCheckpoints[i], jCheckpoints[i]); err != nil {
 			traceutil.AnnotateError(span, err)
 			return err
 		}
 		// Send notification of the processed block to the state feed.
-		s.stateNotifier.StateFeed().Send(&feed.Event{
+		s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
 			Type: statefeed.BlockProcessed,
 			Data: &statefeed.BlockProcessedData{
 				Slot:        blockCopy.Block.Slot,
@@ -180,18 +142,18 @@ func (s *Service) handlePostBlockOperations(b *ethpb.BeaconBlock) error {
 	}
 
 	// Add block attestations to the fork choice pool to compute head.
-	if err := s.attPool.SaveBlockAttestations(b.Body.Attestations); err != nil {
+	if err := s.cfg.AttPool.SaveBlockAttestations(b.Body.Attestations); err != nil {
 		log.Errorf("Could not save block attestations for fork choice: %v", err)
 		return nil
 	}
 	// Mark block exits as seen so we don't include same ones in future blocks.
 	for _, e := range b.Body.VoluntaryExits {
-		s.exitPool.MarkIncluded(e)
+		s.cfg.ExitPool.MarkIncluded(e)
 	}
 
 	//  Mark attester slashings as seen so we don't include same ones in future blocks.
 	for _, as := range b.Body.AttesterSlashings {
-		s.slashingPool.MarkIncludedAttesterSlashing(as)
+		s.cfg.SlashingPool.MarkIncludedAttesterSlashing(as)
 	}
 	return nil
 }
@@ -207,9 +169,9 @@ func (s *Service) checkSaveHotStateDB(ctx context.Context) error {
 	}
 
 	if sinceFinality >= epochsSinceFinalitySaveHotStateDB {
-		s.stateGen.EnableSaveHotStateToDB(ctx)
+		s.cfg.StateGen.EnableSaveHotStateToDB(ctx)
 		return nil
 	}
 
-	return s.stateGen.DisableSaveHotStateToDB(ctx)
+	return s.cfg.StateGen.DisableSaveHotStateToDB(ctx)
 }

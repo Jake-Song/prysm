@@ -5,7 +5,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/prysmaticlabs/eth2-types"
+	types "github.com/prysmaticlabs/eth2-types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	"github.com/prysmaticlabs/prysm/shared/backuputil"
 	"github.com/prysmaticlabs/prysm/validator/db/kv"
@@ -29,11 +29,11 @@ type ValidatorDB interface {
 	SaveGenesisValidatorsRoot(ctx context.Context, genValRoot []byte) error
 
 	// Proposer protection related methods.
-	HighestSignedProposal(ctx context.Context, publicKey [48]byte) (uint64, bool, error)
-	LowestSignedProposal(ctx context.Context, publicKey [48]byte) (uint64, bool, error)
+	HighestSignedProposal(ctx context.Context, publicKey [48]byte) (types.Slot, bool, error)
+	LowestSignedProposal(ctx context.Context, publicKey [48]byte) (types.Slot, bool, error)
 	ProposalHistoryForPubKey(ctx context.Context, publicKey [48]byte) ([]*kv.Proposal, error)
-	ProposalHistoryForSlot(ctx context.Context, publicKey [48]byte, slot uint64) ([32]byte, bool, error)
-	SaveProposalHistoryForSlot(ctx context.Context, pubKey [48]byte, slot uint64, signingRoot []byte) error
+	ProposalHistoryForSlot(ctx context.Context, publicKey [48]byte, slot types.Slot) ([32]byte, bool, error)
+	SaveProposalHistoryForSlot(ctx context.Context, pubKey [48]byte, slot types.Slot, signingRoot []byte) error
 	ProposedPublicKeys(ctx context.Context) ([][48]byte, error)
 
 	// Attester protection related methods.
@@ -57,4 +57,8 @@ type ValidatorDB interface {
 	AttestationHistoryForPubKey(
 		ctx context.Context, pubKey [48]byte,
 	) ([]*kv.AttestationRecord, error)
+
+	// Graffiti ordered index related methods
+	SaveGraffitiOrderedIndex(ctx context.Context, index uint64) error
+	GraffitiOrderedIndex(ctx context.Context, fileHash [32]byte) (uint64, error)
 }

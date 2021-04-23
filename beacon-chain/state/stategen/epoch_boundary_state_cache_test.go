@@ -3,6 +3,7 @@ package stategen
 import (
 	"testing"
 
+	types "github.com/prysmaticlabs/eth2-types"
 	"github.com/prysmaticlabs/prysm/shared/testutil"
 	"github.com/prysmaticlabs/prysm/shared/testutil/assert"
 	"github.com/prysmaticlabs/prysm/shared/testutil/require"
@@ -34,7 +35,7 @@ func TestEpochBoundaryStateCache_CanSave(t *testing.T) {
 	got, exists, err = e.getByRoot([32]byte{'a'})
 	require.NoError(t, err)
 	assert.Equal(t, true, exists, "Should exist")
-	assert.DeepEqual(t, s.InnerStateUnsafe(), got.state.InnerStateUnsafe(), "Should have the same state")
+	assert.DeepSSZEqual(t, s.InnerStateUnsafe(), got.state.InnerStateUnsafe(), "Should have the same state")
 
 	got, exists, err = e.getBySlot(2)
 	require.NoError(t, err)
@@ -44,13 +45,13 @@ func TestEpochBoundaryStateCache_CanSave(t *testing.T) {
 	got, exists, err = e.getBySlot(1)
 	require.NoError(t, err)
 	assert.Equal(t, true, exists, "Should exist")
-	assert.DeepEqual(t, s.InnerStateUnsafe(), got.state.InnerStateUnsafe(), "Should have the same state")
+	assert.DeepSSZEqual(t, s.InnerStateUnsafe(), got.state.InnerStateUnsafe(), "Should have the same state")
 }
 
 func TestEpochBoundaryStateCache_CanTrim(t *testing.T) {
 	e := newBoundaryStateCache()
-	offSet := uint64(10)
-	for i := uint64(0); i < maxCacheSize+offSet; i++ {
+	offSet := types.Slot(10)
+	for i := types.Slot(0); i < offSet.Add(maxCacheSize); i++ {
 		s, err := testutil.NewBeaconState()
 		require.NoError(t, err)
 		require.NoError(t, s.SetSlot(i))

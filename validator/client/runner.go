@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	types "github.com/prysmaticlabs/eth2-types"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/helpers"
 	"github.com/prysmaticlabs/prysm/shared/bytesutil"
 	"github.com/prysmaticlabs/prysm/shared/featureconfig"
 	"github.com/prysmaticlabs/prysm/shared/params"
-	"github.com/prysmaticlabs/prysm/validator/keymanager"
+	"github.com/prysmaticlabs/prysm/validator/client/iface"
 	"go.opencensus.io/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -19,32 +20,6 @@ import (
 
 // time to wait before trying to reconnect with beacon node.
 var backOffPeriod = 10 * time.Second
-var errConnectionIssue = errors.New("could not connect")
-
-// Validator interface defines the primary methods of a validator client.
-type Validator interface {
-	Done()
-	WaitForChainStart(ctx context.Context) error
-	WaitForSync(ctx context.Context) error
-	WaitForActivation(ctx context.Context, accountsChangedChan chan struct{}) error
-	SlasherReady(ctx context.Context) error
-	CanonicalHeadSlot(ctx context.Context) (uint64, error)
-	NextSlot() <-chan uint64
-	SlotDeadline(slot uint64) time.Time
-	LogValidatorGainsAndLosses(ctx context.Context, slot uint64) error
-	UpdateDuties(ctx context.Context, slot uint64) error
-	RolesAt(ctx context.Context, slot uint64) (map[[48]byte][]ValidatorRole, error) // validator pubKey -> roles
-	SubmitAttestation(ctx context.Context, slot uint64, pubKey [48]byte)
-	ProposeBlock(ctx context.Context, slot uint64, pubKey [48]byte)
-	SubmitAggregateAndProof(ctx context.Context, slot uint64, pubKey [48]byte)
-	LogAttestationsSubmitted()
-	LogNextDutyTimeLeft(slot uint64) error
-	UpdateDomainDataCaches(ctx context.Context, slot uint64)
-	WaitForWalletInitialization(ctx context.Context) error
-	AllValidatorsAreExited(ctx context.Context) (bool, error)
-	GetKeymanager() keymanager.IKeymanager
-	ReceiveBlocks(ctx context.Context, connectionErrorChannel chan error)
-}
 
 // Run the main validator routine. This routine exits if the context is
 // canceled.
@@ -56,7 +31,7 @@ type Validator interface {
 // 4 - Update assignments
 // 5 - Determine role at current slot
 // 6 - Perform assigned role, if any
-func run(ctx context.Context, v Validator) {
+func run(ctx context.Context, v iface.Validator) {
 	cleanup := v.Done
 	defer cleanup()
 	if err := v.WaitForWalletInitialization(ctx); err != nil {
@@ -72,9 +47,8 @@ func run(ctx context.Context, v Validator) {
 	ticker := time.NewTicker(backOffPeriod)
 	defer ticker.Stop()
 
-	var headSlot uint64
+	var headSlot types.Slot
 	firstTime := true
-	accountsChangedChan := make(chan struct{}, 1)
 	for {
 		if !firstTime {
 			if ctx.Err() != nil {
@@ -101,7 +75,7 @@ func run(ctx context.Context, v Validator) {
 		if err != nil {
 			log.Fatalf("Could not determine if beacon node synced: %v", err)
 		}
-		err = v.WaitForActivation(ctx, accountsChangedChan)
+		err = v.WaitForActivation(ctx, nil /* accountsChangedChan */)
 		if isConnectionError(err) {
 			log.Warnf("Could not wait for validator activation: %v", err)
 			continue
@@ -120,12 +94,14 @@ func run(ctx context.Context, v Validator) {
 		break
 	}
 
-	go handleAccountsChanged(ctx, v, accountsChangedChan)
 	connectionErrorChannel := make(chan error, 1)
 	go v.ReceiveBlocks(ctx, connectionErrorChannel)
 	if err := v.UpdateDuties(ctx, headSlot); err != nil {
 		handleAssignmentError(err, headSlot)
 	}
+
+	accountsChangedChan := make(chan [][48]byte, 1)
+	sub := v.GetKeymanager().SubscribeAccountChanges(accountsChangedChan)
 	for {
 		slotCtx, cancel := context.WithCancel(ctx)
 		ctx, span := trace.StartSpan(ctx, "validator.processSlot")
@@ -135,12 +111,26 @@ func run(ctx context.Context, v Validator) {
 			log.Info("Context canceled, stopping validator")
 			span.End()
 			cancel()
+			sub.Unsubscribe()
+			close(accountsChangedChan)
 			return // Exit if context is canceled.
 		case blocksError := <-connectionErrorChannel:
 			if blocksError != nil {
 				log.WithError(blocksError).Warn("block stream interrupted")
 				go v.ReceiveBlocks(ctx, connectionErrorChannel)
 				continue
+			}
+		case newKeys := <-accountsChangedChan:
+			anyActive, err := v.HandleKeyReload(ctx, newKeys)
+			if err != nil {
+				log.WithError(err).Error("Could not properly handle reloaded keys")
+			}
+			if !anyActive {
+				log.Info("No active keys found. Waiting for activation...")
+				err := v.WaitForActivation(ctx, accountsChangedChan)
+				if err != nil {
+					log.Fatalf("Could not wait for validator activation: %v", err)
+				}
 			}
 		case slot := <-v.NextSlot():
 			span.AddAttributes(trace.Int64Attribute("slot", int64(slot)))
@@ -184,16 +174,16 @@ func run(ctx context.Context, v Validator) {
 			for pubKey, roles := range allRoles {
 				wg.Add(len(roles))
 				for _, role := range roles {
-					go func(role ValidatorRole, pubKey [48]byte) {
+					go func(role iface.ValidatorRole, pubKey [48]byte) {
 						defer wg.Done()
 						switch role {
-						case roleAttester:
+						case iface.RoleAttester:
 							v.SubmitAttestation(slotCtx, slot, pubKey)
-						case roleProposer:
+						case iface.RoleProposer:
 							v.ProposeBlock(slotCtx, slot, pubKey)
-						case roleAggregator:
+						case iface.RoleAggregator:
 							v.SubmitAggregateAndProof(slotCtx, slot, pubKey)
-						case roleUnknown:
+						case iface.RoleUnknown:
 							log.WithField("pubKey", fmt.Sprintf("%#x", bytesutil.Trunc(pubKey[:]))).Trace("No active roles, doing nothing")
 						default:
 							log.Warnf("Unhandled role %v", role)
@@ -220,36 +210,15 @@ func run(ctx context.Context, v Validator) {
 }
 
 func isConnectionError(err error) bool {
-	return err != nil && errors.Is(err, errConnectionIssue)
+	return err != nil && errors.Is(err, iface.ErrConnectionIssue)
 }
 
-func handleAssignmentError(err error, slot uint64) {
+func handleAssignmentError(err error, slot types.Slot) {
 	if errCode, ok := status.FromError(err); ok && errCode.Code() == codes.NotFound {
 		log.WithField(
 			"epoch", slot/params.BeaconConfig().SlotsPerEpoch,
 		).Warn("Validator not yet assigned to epoch")
 	} else {
 		log.WithField("error", err).Error("Failed to update assignments")
-	}
-}
-
-func handleAccountsChanged(ctx context.Context, v Validator, accountsChangedChan chan struct{}) {
-	validatingPubKeysChan := make(chan [][48]byte, 1)
-	var sub = v.GetKeymanager().SubscribeAccountChanges(validatingPubKeysChan)
-	defer func() {
-		sub.Unsubscribe()
-		close(validatingPubKeysChan)
-	}()
-
-	for {
-		select {
-		case <-validatingPubKeysChan:
-			accountsChangedChan <- struct{}{}
-		case err := <-sub.Err():
-			log.WithError(err).Error("accounts changed subscription failed")
-			return
-		case <-ctx.Done():
-			return
-		}
 	}
 }

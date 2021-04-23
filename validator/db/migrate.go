@@ -11,7 +11,8 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-func migrateUp(cliCtx *cli.Context) error {
+// MigrateUp for a validator database.
+func MigrateUp(cliCtx *cli.Context) error {
 	dataDir := cliCtx.String(cmd.DataDirFlag.Name)
 
 	if !fileutil.FileExists(path.Join(dataDir, kv.ProtectionDbFileName)) {
@@ -19,14 +20,17 @@ func migrateUp(cliCtx *cli.Context) error {
 	}
 
 	ctx := context.Background()
-	validatorDB, err := kv.NewKVStore(ctx, dataDir, nil)
+	log.Info("Opening DB")
+	validatorDB, err := kv.NewKVStore(ctx, dataDir, &kv.Config{})
 	if err != nil {
 		return err
 	}
+	log.Info("Running migrations")
 	return validatorDB.RunUpMigrations(ctx)
 }
 
-func migrateDown(cliCtx *cli.Context) error {
+// MigrateDown for a validator database.
+func MigrateDown(cliCtx *cli.Context) error {
 	dataDir := cliCtx.String(cmd.DataDirFlag.Name)
 
 	if !fileutil.FileExists(path.Join(dataDir, kv.ProtectionDbFileName)) {
@@ -34,9 +38,11 @@ func migrateDown(cliCtx *cli.Context) error {
 	}
 
 	ctx := context.Background()
-	validatorDB, err := kv.NewKVStore(ctx, dataDir, nil)
+	log.Info("Opening DB")
+	validatorDB, err := kv.NewKVStore(ctx, dataDir, &kv.Config{})
 	if err != nil {
 		return err
 	}
+	log.Info("Running migrations")
 	return validatorDB.RunDownMigrations(ctx)
 }

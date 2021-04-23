@@ -12,9 +12,7 @@ import (
 )
 
 // ToBytes returns integer x to bytes in little-endian format at the specified length.
-// Spec pseudocode definition:
-//   def int_to_bytes(integer: int, length: int) -> bytes:
-//     return integer.to_bytes(length, 'little')
+// Spec defines similar method uint_to_bytes(n: uint) -> bytes, which is equivalent to ToBytes(n, 8).
 func ToBytes(x uint64, length int) []byte {
 	makeLength := length
 	if length < 8 {
@@ -324,6 +322,16 @@ func EpochToBytesBigEndian(i types.Epoch) []byte {
 // BytesToEpochBigEndian conversion.
 func BytesToEpochBigEndian(b []byte) types.Epoch {
 	return types.Epoch(BytesToUint64BigEndian(b))
+}
+
+// SlotToBytesBigEndian conversion.
+func SlotToBytesBigEndian(i types.Slot) []byte {
+	return Uint64ToBytesBigEndian(uint64(i))
+}
+
+// BytesToSlotBigEndian conversion.
+func BytesToSlotBigEndian(b []byte) types.Slot {
+	return types.Slot(BytesToUint64BigEndian(b))
 }
 
 // IsBytes32Hex checks whether the byte array is a 32-byte long hex number.

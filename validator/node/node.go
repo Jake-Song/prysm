@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/pkg/errors"
+	"github.com/prysmaticlabs/prysm/cmd/validator/flags"
 	"github.com/prysmaticlabs/prysm/shared"
 	"github.com/prysmaticlabs/prysm/shared/backuputil"
 	"github.com/prysmaticlabs/prysm/shared/cmd"
@@ -26,10 +27,10 @@ import (
 	"github.com/prysmaticlabs/prysm/shared/prometheus"
 	"github.com/prysmaticlabs/prysm/shared/tracing"
 	"github.com/prysmaticlabs/prysm/shared/version"
+	accountsiface "github.com/prysmaticlabs/prysm/validator/accounts/iface"
 	"github.com/prysmaticlabs/prysm/validator/accounts/wallet"
 	"github.com/prysmaticlabs/prysm/validator/client"
 	"github.com/prysmaticlabs/prysm/validator/db/kv"
-	"github.com/prysmaticlabs/prysm/validator/flags"
 	g "github.com/prysmaticlabs/prysm/validator/graffiti"
 	"github.com/prysmaticlabs/prysm/validator/keymanager"
 	"github.com/prysmaticlabs/prysm/validator/keymanager/imported"
@@ -75,7 +76,7 @@ func NewValidatorClient(cliCtx *cli.Context) (*ValidatorClient, error) {
 	logrus.SetLevel(level)
 
 	// Warn if user's platform is not supported
-	prereq.WarnIfNotSupported(cliCtx.Context)
+	prereq.WarnIfPlatformNotSupported(cliCtx.Context)
 
 	registry := shared.NewServiceRegistry()
 	ctx, cancel := context.WithCancel(cliCtx.Context)
@@ -186,7 +187,7 @@ func (c *ValidatorClient) initializeFromCLI(cliCtx *cli.Context) error {
 			"wallet":          w.AccountsDir(),
 			"keymanager-kind": w.KeymanagerKind().String(),
 		}).Info("Opened validator wallet")
-		keyManager, err = w.InitializeKeymanager(cliCtx.Context)
+		keyManager, err = w.InitializeKeymanager(cliCtx.Context, accountsiface.InitKeymanagerConfig{ListenForChanges: true})
 		if err != nil {
 			return errors.Wrap(err, "could not read keymanager for wallet")
 		}
@@ -224,7 +225,10 @@ func (c *ValidatorClient) initializeFromCLI(cliCtx *cli.Context) error {
 	}
 	log.WithField("databasePath", dataDir).Info("Checking DB")
 
-	valDB, err := kv.NewKVStore(cliCtx.Context, dataDir, nil)
+	valDB, err := kv.NewKVStore(cliCtx.Context, dataDir, &kv.Config{
+		PubKeys:         nil,
+		InitialMMapSize: cliCtx.Int(cmd.BoltMMapInitialSizeFlag.Name),
+	})
 	if err != nil {
 		return errors.Wrap(err, "could not initialize db")
 	}
@@ -260,13 +264,12 @@ func (c *ValidatorClient) initializeFromCLI(cliCtx *cli.Context) error {
 func (c *ValidatorClient) initializeForWeb(cliCtx *cli.Context) error {
 	var keyManager keymanager.IKeymanager
 	var err error
-	walletDir := cliCtx.String(flags.WalletDirFlag.Name)
-	defaultWalletPasswordFilePath := filepath.Join(walletDir, wallet.DefaultWalletPasswordFile)
-	if fileutil.FileExists(defaultWalletPasswordFilePath) {
-		if err := cliCtx.Set(flags.WalletPasswordFileFlag.Name, defaultWalletPasswordFilePath); err != nil {
-			return errors.Wrap(err, "could not set default wallet password file path")
-		}
+
+	// Read the wallet password file from the cli context.
+	if err = setWalletPasswordFilePath(cliCtx); err != nil {
+		return errors.Wrap(err, "could not read wallet password file")
 	}
+
 	// Read the wallet from the specified path.
 	w, err := wallet.OpenWalletOrElseCli(cliCtx, func(cliCtx *cli.Context) (*wallet.Wallet, error) {
 		return nil, nil
@@ -280,7 +283,7 @@ func (c *ValidatorClient) initializeForWeb(cliCtx *cli.Context) error {
 			"wallet":          w.AccountsDir(),
 			"keymanager-kind": w.KeymanagerKind().String(),
 		}).Info("Opened validator wallet")
-		keyManager, err = w.InitializeKeymanager(cliCtx.Context)
+		keyManager, err = w.InitializeKeymanager(cliCtx.Context, accountsiface.InitKeymanagerConfig{ListenForChanges: true})
 		if err != nil {
 			return errors.Wrap(err, "could not read keymanager for wallet")
 		}
@@ -311,7 +314,10 @@ func (c *ValidatorClient) initializeForWeb(cliCtx *cli.Context) error {
 		}
 	}
 	log.WithField("databasePath", dataDir).Info("Checking DB")
-	valDB, err := kv.NewKVStore(cliCtx.Context, dataDir, make([][48]byte, 0))
+	valDB, err := kv.NewKVStore(cliCtx.Context, dataDir, &kv.Config{
+		PubKeys:         nil,
+		InitialMMapSize: cliCtx.Int(cmd.BoltMMapInitialSizeFlag.Name),
+	})
 	if err != nil {
 		return errors.Wrap(err, "could not initialize db")
 	}
@@ -513,6 +519,30 @@ func (c *ValidatorClient) registerRPCGatewayService(cliCtx *cli.Context) error {
 	return c.services.RegisterService(gatewaySrv)
 }
 
+func setWalletPasswordFilePath(cliCtx *cli.Context) error {
+	walletDir := cliCtx.String(flags.WalletDirFlag.Name)
+	defaultWalletPasswordFilePath := filepath.Join(walletDir, wallet.DefaultWalletPasswordFile)
+	if fileutil.FileExists(defaultWalletPasswordFilePath) {
+		// Ensure file has proper permissions.
+		hasPerms, err := fileutil.HasReadWritePermissions(defaultWalletPasswordFilePath)
+		if err != nil {
+			return err
+		}
+		if !hasPerms {
+			return fmt.Errorf(
+				"wallet password file %s does not have proper 0600 permissions",
+				defaultWalletPasswordFilePath,
+			)
+		}
+
+		// Set the filepath into the cli context.
+		if err := cliCtx.Set(flags.WalletPasswordFileFlag.Name, defaultWalletPasswordFilePath); err != nil {
+			return errors.Wrap(err, "could not set default wallet password file path")
+		}
+	}
+	return nil
+}
+
 func clearDB(ctx context.Context, dataDir string, force bool) error {
 	var err error
 	clearDBConfirmed := force
@@ -528,7 +558,7 @@ func clearDB(ctx context.Context, dataDir string, force bool) error {
 	}
 
 	if clearDBConfirmed {
-		valDB, err := kv.NewKVStore(ctx, dataDir, nil)
+		valDB, err := kv.NewKVStore(ctx, dataDir, &kv.Config{})
 		if err != nil {
 			return errors.Wrapf(err, "Could not create DB in dir %s", dataDir)
 		}

@@ -7,14 +7,15 @@ import (
 	"time"
 
 	"github.com/paulbellamy/ratecounter"
+	types "github.com/prysmaticlabs/eth2-types"
 	eth "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	mock "github.com/prysmaticlabs/prysm/beacon-chain/blockchain/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/feed"
 	statefeed "github.com/prysmaticlabs/prysm/beacon-chain/core/feed/state"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/helpers"
 	dbtest "github.com/prysmaticlabs/prysm/beacon-chain/db/testing"
-	"github.com/prysmaticlabs/prysm/beacon-chain/flags"
 	p2pt "github.com/prysmaticlabs/prysm/beacon-chain/p2p/testing"
+	"github.com/prysmaticlabs/prysm/cmd/beacon-chain/flags"
 	"github.com/prysmaticlabs/prysm/shared/abool"
 	"github.com/prysmaticlabs/prysm/shared/event"
 	"github.com/prysmaticlabs/prysm/shared/params"
@@ -108,7 +109,7 @@ func TestService_InitStartStop(t *testing.T) {
 				// Set to some future slot, and then make sure that current head matches it.
 				st, err := testutil.NewBeaconState()
 				require.NoError(t, err)
-				futureSlot := uint64(27354)
+				futureSlot := types.Slot(27354)
 				require.NoError(t, st.SetSlot(futureSlot))
 				return &mock.ChainService{
 					State: st,
@@ -118,7 +119,7 @@ func TestService_InitStartStop(t *testing.T) {
 				}
 			},
 			methodRuns: func(fd *event.Feed) {
-				futureSlot := uint64(27354)
+				futureSlot := types.Slot(27354)
 				// Send valid event.
 				fd.Send(&feed.Event{
 					Type: statefeed.Initialized,
@@ -193,14 +194,13 @@ func TestService_waitForStateInitialization(t *testing.T) {
 	newService := func(ctx context.Context, mc *mock.ChainService) *Service {
 		ctx, cancel := context.WithCancel(ctx)
 		s := &Service{
-			ctx:           ctx,
-			cancel:        cancel,
-			chain:         mc,
-			synced:        abool.New(),
-			chainStarted:  abool.New(),
-			stateNotifier: mc.StateNotifier(),
-			counter:       ratecounter.NewRateCounter(counterSeconds * time.Second),
-			genesisChan:   make(chan time.Time),
+			cfg:          &Config{Chain: mc, StateNotifier: mc.StateNotifier()},
+			ctx:          ctx,
+			cancel:       cancel,
+			synced:       abool.New(),
+			chainStarted: abool.New(),
+			counter:      ratecounter.NewRateCounter(counterSeconds * time.Second),
+			genesisChan:  make(chan time.Time),
 		}
 		return s
 	}
@@ -252,12 +252,12 @@ func TestService_waitForStateInitialization(t *testing.T) {
 		go func() {
 			time.AfterFunc(500*time.Millisecond, func() {
 				// Send invalid event at first.
-				s.stateNotifier.StateFeed().Send(&feed.Event{
+				s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
 					Type: statefeed.Initialized,
 					Data: &statefeed.BlockProcessedData{},
 				})
 				// Send valid event.
-				s.stateNotifier.StateFeed().Send(&feed.Event{
+				s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
 					Type: statefeed.Initialized,
 					Data: &statefeed.InitializedData{
 						StartTime:             expectedGenesisTime,
@@ -283,7 +283,7 @@ func TestService_waitForStateInitialization(t *testing.T) {
 		defer cancel()
 		s := newService(ctx, &mock.ChainService{})
 		// Initialize mock feed
-		_ = s.stateNotifier.StateFeed()
+		_ = s.cfg.StateNotifier.StateFeed()
 
 		expectedGenesisTime := time.Now().Add(60 * time.Second)
 		wg := &sync.WaitGroup{}
@@ -297,7 +297,7 @@ func TestService_waitForStateInitialization(t *testing.T) {
 		go func() {
 			time.AfterFunc(500*time.Millisecond, func() {
 				// Send valid event.
-				s.stateNotifier.StateFeed().Send(&feed.Event{
+				s.cfg.StateNotifier.StateFeed().Send(&feed.Event{
 					Type: statefeed.Initialized,
 					Data: &statefeed.InitializedData{
 						StartTime:             expectedGenesisTime,
@@ -338,7 +338,7 @@ func TestService_markSynced(t *testing.T) {
 	var receivedGenesisTime time.Time
 
 	stateChannel := make(chan *feed.Event, 1)
-	stateSub := s.stateNotifier.StateFeed().Subscribe(stateChannel)
+	stateSub := s.cfg.StateNotifier.StateFeed().Subscribe(stateChannel)
 	defer stateSub.Unsubscribe()
 
 	wg := &sync.WaitGroup{}
@@ -393,7 +393,7 @@ func TestService_Resync(t *testing.T) {
 			chainService: func() *mock.ChainService {
 				st, err := testutil.NewBeaconState()
 				require.NoError(t, err)
-				futureSlot := uint64(160)
+				futureSlot := types.Slot(160)
 				require.NoError(t, st.SetGenesisTime(uint64(makeGenesisTime(futureSlot).Unix())))
 				return &mock.ChainService{
 					State: st,
@@ -406,7 +406,7 @@ func TestService_Resync(t *testing.T) {
 			},
 			assert: func(s *Service) {
 				assert.LogsContain(t, hook, "Resync attempt complete")
-				assert.Equal(t, uint64(160), s.chain.HeadSlot())
+				assert.Equal(t, types.Slot(160), s.cfg.Chain.HeadSlot())
 			},
 		},
 	}
@@ -427,7 +427,7 @@ func TestService_Resync(t *testing.T) {
 				StateNotifier: mc.StateNotifier(),
 			})
 			assert.NotNil(t, s)
-			assert.Equal(t, uint64(0), s.chain.HeadSlot())
+			assert.Equal(t, types.Slot(0), s.cfg.Chain.HeadSlot())
 			err := s.Resync()
 			if tt.wantedErr != "" {
 				assert.ErrorContains(t, tt.wantedErr, err)
@@ -442,7 +442,9 @@ func TestService_Resync(t *testing.T) {
 }
 
 func TestService_Initialized(t *testing.T) {
-	s := NewService(context.Background(), &Config{})
+	s := NewService(context.Background(), &Config{
+		StateNotifier: &mock.MockStateNotifier{},
+	})
 	s.chainStarted.Set()
 	assert.Equal(t, true, s.Initialized())
 	s.chainStarted.UnSet()

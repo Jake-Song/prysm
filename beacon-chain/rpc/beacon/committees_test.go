@@ -11,7 +11,7 @@ import (
 	mock "github.com/prysmaticlabs/prysm/beacon-chain/blockchain/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/helpers"
 	dbTest "github.com/prysmaticlabs/prysm/beacon-chain/db/testing"
-	stateTrie "github.com/prysmaticlabs/prysm/beacon-chain/state"
+	iface "github.com/prysmaticlabs/prysm/beacon-chain/state/interface"
 	"github.com/prysmaticlabs/prysm/beacon-chain/state/stategen"
 	pbp2p "github.com/prysmaticlabs/prysm/proto/beacon/p2p/v1"
 	"github.com/prysmaticlabs/prysm/shared/params"
@@ -30,8 +30,9 @@ func TestServer_ListBeaconCommittees_CurrentEpoch(t *testing.T) {
 	ctx := context.Background()
 	headState := setupActiveValidators(t, numValidators)
 
+	offset := int64(headState.Slot().Mul(params.BeaconConfig().SecondsPerSlot))
 	m := &mock.ChainService{
-		Genesis: timeutils.Now().Add(time.Duration(-1*int64(headState.Slot()*params.BeaconConfig().SecondsPerSlot)) * time.Second),
+		Genesis: timeutils.Now().Add(time.Duration(-1*offset) * time.Second),
 	}
 	bs := &Server{
 		HeadFetcher:        m,
@@ -54,7 +55,7 @@ func TestServer_ListBeaconCommittees_CurrentEpoch(t *testing.T) {
 
 	wanted := &ethpb.BeaconCommittees{
 		Epoch:                0,
-		Committees:           committees,
+		Committees:           committees.SlotToUint64(),
 		ActiveValidatorCount: uint64(numValidators),
 	}
 	res, err := bs.ListBeaconCommittees(context.Background(), &ethpb.ListCommitteesRequest{
@@ -90,9 +91,10 @@ func TestServer_ListBeaconCommittees_PreviousEpoch(t *testing.T) {
 	require.NoError(t, db.SaveState(ctx, headState, gRoot))
 	require.NoError(t, db.SaveGenesisBlockRoot(ctx, gRoot))
 
+	offset := int64(headState.Slot().Mul(params.BeaconConfig().SecondsPerSlot))
 	m := &mock.ChainService{
 		State:   headState,
-		Genesis: timeutils.Now().Add(time.Duration(-1*int64(headState.Slot()*params.BeaconConfig().SecondsPerSlot)) * time.Second),
+		Genesis: timeutils.Now().Add(time.Duration(-1*offset) * time.Second),
 	}
 	bs := &Server{
 		HeadFetcher:        m,
@@ -119,7 +121,7 @@ func TestServer_ListBeaconCommittees_PreviousEpoch(t *testing.T) {
 			},
 			res: &ethpb.BeaconCommittees{
 				Epoch:                1,
-				Committees:           wanted,
+				Committees:           wanted.SlotToUint64(),
 				ActiveValidatorCount: uint64(numValidators),
 			},
 		},
@@ -144,8 +146,9 @@ func TestRetrieveCommitteesForRoot(t *testing.T) {
 	numValidators := 128
 	headState := setupActiveValidators(t, numValidators)
 
+	offset := int64(headState.Slot().Mul(params.BeaconConfig().SecondsPerSlot))
 	m := &mock.ChainService{
-		Genesis: timeutils.Now().Add(time.Duration(-1*int64(headState.Slot()*params.BeaconConfig().SecondsPerSlot)) * time.Second),
+		Genesis: timeutils.Now().Add(time.Duration(-1*offset) * time.Second),
 	}
 	bs := &Server{
 		HeadFetcher:        m,
@@ -179,18 +182,18 @@ func TestRetrieveCommitteesForRoot(t *testing.T) {
 
 	wantedRes := &ethpb.BeaconCommittees{
 		Epoch:                0,
-		Committees:           wanted,
+		Committees:           wanted.SlotToUint64(),
 		ActiveValidatorCount: uint64(numValidators),
 	}
 	receivedRes := &ethpb.BeaconCommittees{
 		Epoch:                0,
-		Committees:           committees,
+		Committees:           committees.SlotToUint64(),
 		ActiveValidatorCount: uint64(len(activeIndices)),
 	}
 	assert.DeepEqual(t, wantedRes, receivedRes)
 }
 
-func setupActiveValidators(t *testing.T, count int) *stateTrie.BeaconState {
+func setupActiveValidators(t *testing.T, count int) iface.BeaconState {
 	balances := make([]uint64, count)
 	validators := make([]*ethpb.Validator, 0, count)
 	for i := 0; i < count; i++ {

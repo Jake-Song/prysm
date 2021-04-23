@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prysmaticlabs/eth2-types"
+	types "github.com/prysmaticlabs/eth2-types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	mockChain "github.com/prysmaticlabs/prysm/beacon-chain/blockchain/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/feed"
@@ -29,17 +29,18 @@ func TestProposeExit_Notification(t *testing.T) {
 	testutil.ResetCache()
 	deposits, keys, err := testutil.DeterministicDepositsAndKeys(params.BeaconConfig().MinGenesisActiveValidatorCount)
 	require.NoError(t, err)
-	beaconState, err := state.GenesisBeaconState(deposits, 0, &ethpb.Eth1Data{BlockHash: make([]byte, 32)})
+	beaconState, err := state.GenesisBeaconState(ctx, deposits, 0, &ethpb.Eth1Data{BlockHash: make([]byte, 32)})
 	require.NoError(t, err)
 	epoch := types.Epoch(2048)
-	require.NoError(t, beaconState.SetSlot(uint64(epoch)*params.BeaconConfig().SlotsPerEpoch))
+	require.NoError(t, beaconState.SetSlot(params.BeaconConfig().SlotsPerEpoch.Mul(uint64(epoch))))
 	block := testutil.NewBeaconBlock()
 	require.NoError(t, db.SaveBlock(ctx, block), "Could not save genesis block")
 	genesisRoot, err := block.Block.HashTreeRoot()
 	require.NoError(t, err, "Could not get signing root")
 
 	// Set genesis time to be 100 epochs ago.
-	genesisTime := time.Now().Add(time.Duration(-100*int64(params.BeaconConfig().SecondsPerSlot*params.BeaconConfig().SlotsPerEpoch)) * time.Second)
+	offset := int64(params.BeaconConfig().SlotsPerEpoch.Mul(params.BeaconConfig().SecondsPerSlot))
+	genesisTime := time.Now().Add(time.Duration(-100*offset) * time.Second)
 	mockChainService := &mockChain.ChainService{State: beaconState, Root: genesisRoot[:], Genesis: genesisTime}
 	server := &Server{
 		BeaconDB:          db,
@@ -58,7 +59,7 @@ func TestProposeExit_Notification(t *testing.T) {
 	defer opSub.Unsubscribe()
 
 	// Send the request, expect a result on the state feed.
-	validatorIndex := uint64(0)
+	validatorIndex := types.ValidatorIndex(0)
 	req := &ethpb.SignedVoluntaryExit{
 		Exit: &ethpb.VoluntaryExit{
 			Epoch:          epoch,
@@ -99,17 +100,18 @@ func TestProposeExit_NoPanic(t *testing.T) {
 	testutil.ResetCache()
 	deposits, keys, err := testutil.DeterministicDepositsAndKeys(params.BeaconConfig().MinGenesisActiveValidatorCount)
 	require.NoError(t, err)
-	beaconState, err := state.GenesisBeaconState(deposits, 0, &ethpb.Eth1Data{BlockHash: make([]byte, 32)})
+	beaconState, err := state.GenesisBeaconState(ctx, deposits, 0, &ethpb.Eth1Data{BlockHash: make([]byte, 32)})
 	require.NoError(t, err)
 	epoch := types.Epoch(2048)
-	require.NoError(t, beaconState.SetSlot(uint64(epoch)*params.BeaconConfig().SlotsPerEpoch))
+	require.NoError(t, beaconState.SetSlot(params.BeaconConfig().SlotsPerEpoch.Mul(uint64(epoch))))
 	block := testutil.NewBeaconBlock()
 	require.NoError(t, db.SaveBlock(ctx, block), "Could not save genesis block")
 	genesisRoot, err := block.Block.HashTreeRoot()
 	require.NoError(t, err, "Could not get signing root")
 
 	// Set genesis time to be 100 epochs ago.
-	genesisTime := time.Now().Add(time.Duration(-100*int64(params.BeaconConfig().SecondsPerSlot*params.BeaconConfig().SlotsPerEpoch)) * time.Second)
+	offset := int64(params.BeaconConfig().SlotsPerEpoch.Mul(params.BeaconConfig().SecondsPerSlot))
+	genesisTime := time.Now().Add(time.Duration(-100*offset) * time.Second)
 	mockChainService := &mockChain.ChainService{State: beaconState, Root: genesisRoot[:], Genesis: genesisTime}
 	server := &Server{
 		BeaconDB:          db,
@@ -132,7 +134,7 @@ func TestProposeExit_NoPanic(t *testing.T) {
 	require.ErrorContains(t, "voluntary exit does not exist", err, "Expected error for no exit existing")
 
 	// Send the request, expect a result on the state feed.
-	validatorIndex := uint64(0)
+	validatorIndex := types.ValidatorIndex(0)
 	req = &ethpb.SignedVoluntaryExit{
 		Exit: &ethpb.VoluntaryExit{
 			Epoch:          epoch,

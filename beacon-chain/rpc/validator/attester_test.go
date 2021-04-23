@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	types "github.com/prysmaticlabs/eth2-types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	mock "github.com/prysmaticlabs/prysm/beacon-chain/blockchain/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/cache"
@@ -15,7 +16,7 @@ import (
 	dbutil "github.com/prysmaticlabs/prysm/beacon-chain/db/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/operations/attestations"
 	mockp2p "github.com/prysmaticlabs/prysm/beacon-chain/p2p/testing"
-	beaconstate "github.com/prysmaticlabs/prysm/beacon-chain/state"
+	"github.com/prysmaticlabs/prysm/beacon-chain/state/stateV0"
 	"github.com/prysmaticlabs/prysm/beacon-chain/state/stategen"
 	mockSync "github.com/prysmaticlabs/prysm/beacon-chain/sync/initial-sync/testing"
 	pbp2p "github.com/prysmaticlabs/prysm/proto/beacon/p2p/v1"
@@ -131,6 +132,7 @@ func TestGetAttestationData_OK(t *testing.T) {
 	chainService := &mock.ChainService{
 		Genesis: time.Now(),
 	}
+	offset := int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
 	attesterServer := &Server{
 		BeaconDB:         db,
 		P2P:              &mockp2p.MockBroadcaster{},
@@ -143,7 +145,7 @@ func TestGetAttestationData_OK(t *testing.T) {
 			CurrentJustifiedCheckPoint: beaconState.CurrentJustifiedCheckpoint(),
 		},
 		TimeFetcher: &mock.ChainService{
-			Genesis: time.Now().Add(time.Duration(-1*int64(slot*params.BeaconConfig().SecondsPerSlot)) * time.Second),
+			Genesis: time.Now().Add(time.Duration(-1*offset) * time.Second),
 		},
 		StateNotifier: chainService.StateNotifier(),
 	}
@@ -217,7 +219,7 @@ func TestAttestationDataAtSlot_HandlesFarAwayJustifiedEpoch(t *testing.T) {
 	require.NoError(t, err, "Could not hash justified block")
 	epochBoundaryRoot, err := epochBoundaryBlock.Block.HashTreeRoot()
 	require.NoError(t, err, "Could not hash justified block")
-	slot := uint64(10000)
+	slot := types.Slot(10000)
 
 	beaconState, err := testutil.NewBeaconState()
 	require.NoError(t, err)
@@ -235,6 +237,7 @@ func TestAttestationDataAtSlot_HandlesFarAwayJustifiedEpoch(t *testing.T) {
 	chainService := &mock.ChainService{
 		Genesis: time.Now(),
 	}
+	offset := int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
 	attesterServer := &Server{
 		BeaconDB:         db,
 		P2P:              &mockp2p.MockBroadcaster{},
@@ -244,7 +247,7 @@ func TestAttestationDataAtSlot_HandlesFarAwayJustifiedEpoch(t *testing.T) {
 			CurrentJustifiedCheckPoint: beaconState.CurrentJustifiedCheckpoint(),
 		},
 		SyncChecker:   &mockSync.Sync{IsSyncing: false},
-		TimeFetcher:   &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*int64(slot*params.BeaconConfig().SecondsPerSlot)) * time.Second)},
+		TimeFetcher:   &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*offset) * time.Second)},
 		StateNotifier: chainService.StateNotifier(),
 	}
 	require.NoError(t, db.SaveState(ctx, beaconState, blockRoot))
@@ -278,18 +281,19 @@ func TestAttestationDataAtSlot_HandlesFarAwayJustifiedEpoch(t *testing.T) {
 
 func TestAttestationDataSlot_handlesInProgressRequest(t *testing.T) {
 	s := &pbp2p.BeaconState{Slot: 100}
-	state, err := beaconstate.InitializeFromProto(s)
+	state, err := stateV0.InitializeFromProto(s)
 	require.NoError(t, err)
 	ctx := context.Background()
 	chainService := &mock.ChainService{
 		Genesis: time.Now(),
 	}
-	slot := uint64(2)
+	slot := types.Slot(2)
+	offset := int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
 	server := &Server{
 		HeadFetcher:      &mock.ChainService{State: state},
 		AttestationCache: cache.NewAttestationCache(),
 		SyncChecker:      &mockSync.Sync{IsSyncing: false},
-		TimeFetcher:      &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*int64(slot*params.BeaconConfig().SecondsPerSlot)) * time.Second)},
+		TimeFetcher:      &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*offset) * time.Second)},
 		StateNotifier:    chainService.StateNotifier(),
 	}
 
@@ -332,9 +336,10 @@ func TestServer_GetAttestationData_InvalidRequestSlot(t *testing.T) {
 	ctx := context.Background()
 
 	slot := 3*params.BeaconConfig().SlotsPerEpoch + 1
+	offset := int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
 	attesterServer := &Server{
 		SyncChecker: &mockSync.Sync{IsSyncing: false},
-		TimeFetcher: &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*int64(slot*params.BeaconConfig().SecondsPerSlot)) * time.Second)},
+		TimeFetcher: &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*offset) * time.Second)},
 	}
 
 	req := &ethpb.AttestationDataRequest{
@@ -374,7 +379,8 @@ func TestServer_GetAttestationData_HeadStateSlotGreaterThanRequestSlot(t *testin
 	beaconState, err := testutil.NewBeaconState()
 	require.NoError(t, err)
 	require.NoError(t, beaconState.SetSlot(slot))
-	require.NoError(t, beaconState.SetGenesisTime(uint64(time.Now().Unix()-int64(slot*params.BeaconConfig().SecondsPerSlot))))
+	offset := int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
+	require.NoError(t, beaconState.SetGenesisTime(uint64(time.Now().Unix()-offset)))
 	err = beaconState.SetLatestBlockHeader(testutil.HydrateBeaconHeader(&ethpb.BeaconBlockHeader{
 		ParentRoot: blockRoot2[:],
 	}))
@@ -397,6 +403,7 @@ func TestServer_GetAttestationData_HeadStateSlotGreaterThanRequestSlot(t *testin
 	chainService := &mock.ChainService{
 		Genesis: time.Now(),
 	}
+	offset = int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
 	attesterServer := &Server{
 		BeaconDB:            db,
 		P2P:                 &mockp2p.MockBroadcaster{},
@@ -404,7 +411,7 @@ func TestServer_GetAttestationData_HeadStateSlotGreaterThanRequestSlot(t *testin
 		AttestationCache:    cache.NewAttestationCache(),
 		HeadFetcher:         &mock.ChainService{State: beaconState, Root: blockRoot[:]},
 		FinalizationFetcher: &mock.ChainService{CurrentJustifiedCheckPoint: beaconState.CurrentJustifiedCheckpoint()},
-		TimeFetcher:         &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*int64(slot*params.BeaconConfig().SecondsPerSlot)) * time.Second)},
+		TimeFetcher:         &mock.ChainService{Genesis: time.Now().Add(time.Duration(-1*offset) * time.Second)},
 		StateNotifier:       chainService.StateNotifier(),
 		StateGen:            stategen.New(db),
 	}
@@ -441,7 +448,7 @@ func TestGetAttestationData_SucceedsInFirstEpoch(t *testing.T) {
 	ctx := context.Background()
 	db := dbutil.SetupDB(t)
 
-	slot := uint64(5)
+	slot := types.Slot(5)
 	block := testutil.NewBeaconBlock()
 	block.Block.Slot = slot
 	targetBlock := testutil.NewBeaconBlock()
@@ -471,6 +478,7 @@ func TestGetAttestationData_SucceedsInFirstEpoch(t *testing.T) {
 	chainService := &mock.ChainService{
 		Genesis: time.Now(),
 	}
+	offset := int64(slot.Mul(params.BeaconConfig().SecondsPerSlot))
 	attesterServer := &Server{
 		BeaconDB:         db,
 		P2P:              &mockp2p.MockBroadcaster{},
@@ -482,7 +490,7 @@ func TestGetAttestationData_SucceedsInFirstEpoch(t *testing.T) {
 		FinalizationFetcher: &mock.ChainService{
 			CurrentJustifiedCheckPoint: beaconState.CurrentJustifiedCheckpoint(),
 		},
-		TimeFetcher:   &mock.ChainService{Genesis: timeutils.Now().Add(time.Duration(-1*int64(slot*params.BeaconConfig().SecondsPerSlot)) * time.Second)},
+		TimeFetcher:   &mock.ChainService{Genesis: timeutils.Now().Add(time.Duration(-1*offset) * time.Second)},
 		StateNotifier: chainService.StateNotifier(),
 	}
 	require.NoError(t, db.SaveState(ctx, beaconState, blockRoot))
@@ -550,13 +558,13 @@ func TestServer_SubscribeCommitteeSubnets_DifferentLengthSlots(t *testing.T) {
 		OperationNotifier: (&mock.ChainService{}).OperationNotifier(),
 	}
 
-	var slots []uint64
-	var comIdxs []uint64
+	var slots []types.Slot
+	var comIdxs []types.CommitteeIndex
 	var isAggregator []bool
 
-	for i := uint64(100); i < 200; i++ {
+	for i := types.Slot(100); i < 200; i++ {
 		slots = append(slots, i)
-		comIdxs = append(comIdxs, uint64(randGen.Int63n(64)))
+		comIdxs = append(comIdxs, types.CommitteeIndex(randGen.Int63n(64)))
 		boolVal := randGen.Uint64()%2 == 0
 		isAggregator = append(isAggregator, boolVal)
 	}
@@ -598,13 +606,13 @@ func TestServer_SubscribeCommitteeSubnets_MultipleSlots(t *testing.T) {
 		OperationNotifier: (&mock.ChainService{}).OperationNotifier(),
 	}
 
-	var slots []uint64
-	var comIdxs []uint64
+	var slots []types.Slot
+	var comIdxs []types.CommitteeIndex
 	var isAggregator []bool
 
-	for i := uint64(100); i < 200; i++ {
+	for i := types.Slot(100); i < 200; i++ {
 		slots = append(slots, i)
-		comIdxs = append(comIdxs, uint64(randGen.Int63n(64)))
+		comIdxs = append(comIdxs, types.CommitteeIndex(randGen.Int63n(64)))
 		boolVal := randGen.Uint64()%2 == 0
 		isAggregator = append(isAggregator, boolVal)
 	}
@@ -615,7 +623,7 @@ func TestServer_SubscribeCommitteeSubnets_MultipleSlots(t *testing.T) {
 		IsAggregator: isAggregator,
 	})
 	require.NoError(t, err)
-	for i := uint64(100); i < 200; i++ {
+	for i := types.Slot(100); i < 200; i++ {
 		subnets := cache.SubnetIDs.GetAttesterSubnetIDs(i)
 		assert.Equal(t, 1, len(subnets))
 		if isAggregator[i-100] {

@@ -231,8 +231,8 @@ func (bs *Server) StreamBlocks(req *ethpb.StreamBlocksRequest, stream ethpb.Beac
 						log.WithError(err).WithField("blockSlot", data.SignedBlock.Block.Slot).Error("Could not get head state")
 						continue
 					}
-
-					if err := blocks.VerifyBlockSignature(headState, data.SignedBlock); err != nil {
+					signed := data.SignedBlock
+					if err := blocks.VerifyBlockSignature(headState, signed.Block.ProposerIndex, signed.Signature, signed.Block.HashTreeRoot); err != nil {
 						log.WithError(err).WithField("blockSlot", data.SignedBlock.Block.Slot).Error("Could not verify block signature")
 						continue
 					}
@@ -304,24 +304,33 @@ func (bs *Server) chainHeadRetrieval(ctx context.Context) (*ethpb.ChainHead, err
 	finalizedCheckpoint := bs.FinalizationFetcher.FinalizedCheckpt()
 	if !isGenesis(finalizedCheckpoint) {
 		b, err := bs.BeaconDB.Block(ctx, bytesutil.ToBytes32(finalizedCheckpoint.Root))
-		if err != nil || b == nil || b.Block == nil {
+		if err != nil {
 			return nil, status.Error(codes.Internal, "Could not get finalized block")
+		}
+		if err := helpers.VerifyNilBeaconBlock(b); err != nil {
+			return nil, status.Errorf(codes.Internal, "Could not get finalized block: %v", err)
 		}
 	}
 
 	justifiedCheckpoint := bs.FinalizationFetcher.CurrentJustifiedCheckpt()
 	if !isGenesis(justifiedCheckpoint) {
 		b, err := bs.BeaconDB.Block(ctx, bytesutil.ToBytes32(justifiedCheckpoint.Root))
-		if err != nil || b == nil || b.Block == nil {
+		if err != nil {
 			return nil, status.Error(codes.Internal, "Could not get justified block")
+		}
+		if err := helpers.VerifyNilBeaconBlock(b); err != nil {
+			return nil, status.Errorf(codes.Internal, "Could not get justified block: %v", err)
 		}
 	}
 
 	prevJustifiedCheckpoint := bs.FinalizationFetcher.PreviousJustifiedCheckpt()
 	if !isGenesis(prevJustifiedCheckpoint) {
 		b, err := bs.BeaconDB.Block(ctx, bytesutil.ToBytes32(prevJustifiedCheckpoint.Root))
-		if err != nil || b == nil || b.Block == nil {
+		if err != nil {
 			return nil, status.Error(codes.Internal, "Could not get prev justified block")
+		}
+		if err := helpers.VerifyNilBeaconBlock(b); err != nil {
+			return nil, status.Errorf(codes.Internal, "Could not get prev justified block: %v", err)
 		}
 	}
 
@@ -359,8 +368,7 @@ func (bs *Server) GetWeakSubjectivityCheckpoint(ctx context.Context, _ *ptypes.E
 	if err != nil {
 		return nil, status.Error(codes.Internal, "Could not get head state")
 	}
-	valCount := uint64(hs.NumValidators())
-	wsEpoch, err := helpers.WeakSubjectivityCheckptEpoch(valCount)
+	wsEpoch, err := helpers.LatestWeakSubjectivityEpoch(hs)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "Could not get weak subjectivity epoch")
 	}

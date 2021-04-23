@@ -17,13 +17,14 @@ import (
 	"github.com/prysmaticlabs/prysm/beacon-chain/blockchain/testing"
 	"github.com/prysmaticlabs/prysm/beacon-chain/core/state"
 	"github.com/prysmaticlabs/prysm/beacon-chain/db"
+	beaconkv "github.com/prysmaticlabs/prysm/beacon-chain/db/kv"
 	"github.com/prysmaticlabs/prysm/beacon-chain/forkchoice/protoarray"
 	"github.com/prysmaticlabs/prysm/beacon-chain/operations/attestations"
 	"github.com/prysmaticlabs/prysm/beacon-chain/operations/slashings"
 	"github.com/prysmaticlabs/prysm/beacon-chain/operations/voluntaryexits"
 	"github.com/prysmaticlabs/prysm/beacon-chain/p2p"
 	p2pt "github.com/prysmaticlabs/prysm/beacon-chain/p2p/testing"
-	stateTrie "github.com/prysmaticlabs/prysm/beacon-chain/state"
+	"github.com/prysmaticlabs/prysm/beacon-chain/state/stateV0"
 	"github.com/prysmaticlabs/prysm/beacon-chain/state/stategen"
 	"github.com/prysmaticlabs/prysm/beacon-chain/sync"
 	"github.com/prysmaticlabs/prysm/shared/params"
@@ -51,7 +52,7 @@ func init() {
 
 	var err error
 
-	db1, err = db.NewDB(context.Background(), dbPath)
+	db1, err = db.NewDB(context.Background(), dbPath, &beaconkv.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -98,6 +99,12 @@ func (fakeChecker) Resync() error {
 	return nil
 }
 
+// FuzzBlock wraps BeaconFuzzBlock in a go-fuzz compatible interface
+func FuzzBlock(b []byte) int {
+	BeaconFuzzBlock(b)
+	return 0
+}
+
 // BeaconFuzzBlock runs full processing of beacon block against a given state.
 func BeaconFuzzBlock(b []byte) {
 	params.UseMainnetConfig()
@@ -105,7 +112,7 @@ func BeaconFuzzBlock(b []byte) {
 	if err := input.UnmarshalSSZ(b); err != nil {
 		return
 	}
-	st, err := stateTrie.InitializeFromProtoUnsafe(input.State)
+	st, err := stateV0.InitializeFromProtoUnsafe(input.State)
 	if err != nil {
 		return
 	}

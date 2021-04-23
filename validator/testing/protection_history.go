@@ -3,7 +3,7 @@ package testing
 import (
 	"fmt"
 
-	"github.com/prysmaticlabs/eth2-types"
+	types "github.com/prysmaticlabs/eth2-types"
 	"github.com/prysmaticlabs/prysm/shared/bls"
 	"github.com/prysmaticlabs/prysm/shared/bytesutil"
 	"github.com/prysmaticlabs/prysm/shared/params"
@@ -80,7 +80,7 @@ func MockAttestingAndProposalHistories(numValidators int) ([][]*kv.AttestationRe
 			signingRootStr := fmt.Sprintf("%d", i)
 			copy(signingRoot[:], signingRootStr)
 			proposals = append(proposals, kv.Proposal{
-				Slot:        uint64(i),
+				Slot:        types.Slot(i),
 				SigningRoot: signingRoot[:],
 			})
 		}

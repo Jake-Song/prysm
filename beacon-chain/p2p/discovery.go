@@ -85,6 +85,8 @@ func (s *Service) listenForNewNodes() {
 			log.WithError(err).Error("Could not convert to peer info")
 			continue
 		}
+		// Make sure that peer is not dialed too often, for each connection attempt there's a backoff period.
+		s.Peers().RandomizeBackOff(peerInfo.ID)
 		go func(info *peer.AddrInfo) {
 			if err := s.connectWithPeer(s.ctx, *info); err != nil {
 				log.WithError(err).Tracef("Could not connect with peer %s", info.String())
@@ -288,9 +290,14 @@ func (s *Service) isPeerAtLimit(inbound bool) bool {
 	// we apply the high watermark buffer.
 	if inbound {
 		maxPeers += highWatermarkBuffer
+		maxInbound := s.peers.InboundLimit() + highWatermarkBuffer
+		currInbound := len(s.peers.InboundConnected())
+		// Exit early if we are at the inbound limit.
+		if currInbound >= maxInbound {
+			return true
+		}
 	}
 	activePeers := len(s.Peers().Active())
-
 	return activePeers >= maxPeers || numOfConns >= maxPeers
 }
 

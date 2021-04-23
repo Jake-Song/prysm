@@ -26,7 +26,15 @@ var (
 	pubKeysBucket                 = []byte("pubkeys-bucket")
 	attestationSigningRootsBucket = []byte("att-signing-roots-bucket")
 	attestationSourceEpochsBucket = []byte("att-source-epochs-bucket")
+	attestationTargetEpochsBucket = []byte("att-target-epochs-bucket")
 
 	// Migrations
 	migrationsBucket = []byte("migrations")
+
+	// Graffiti
+	graffitiBucket = []byte("graffiti")
+
+	// Graffiti ordered index and hash keys
+	graffitiOrderedIndexKey = []byte("graffiti-ordered-index")
+	graffitiFileHashKey     = []byte("graffiti-file-hash")
 )

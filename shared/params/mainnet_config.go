@@ -3,7 +3,7 @@ package params
 import (
 	"time"
 
-	"github.com/prysmaticlabs/eth2-types"
+	types "github.com/prysmaticlabs/eth2-types"
 	"github.com/prysmaticlabs/prysm/shared/bytesutil"
 )
 
@@ -55,6 +55,7 @@ var mainnetNetworkConfig = &NetworkConfig{
 var mainnetBeaconConfig = &BeaconChainConfig{
 	// Constants (Non-configurable)
 	FarFutureEpoch:           1<<64 - 1,
+	FarFutureSlot:            1<<64 - 1,
 	BaseRewardsPerEpoch:      4,
 	DepositContractTreeDepth: 32,
 	GenesisDelay:             604800, // 1 week.
@@ -162,8 +163,9 @@ var mainnetBeaconConfig = &BeaconChainConfig{
 	BeaconStateFieldCount:     21,
 
 	// Slasher related values.
-	WeakSubjectivityPeriod:    54000,
-	PruneSlasherStoragePeriod: 10,
+	WeakSubjectivityPeriod:          54000,
+	PruneSlasherStoragePeriod:       10,
+	SlashingProtectionPruningEpochs: 512,
 
 	// Weak subjectivity values.
 	SafetyDecay: 10,
